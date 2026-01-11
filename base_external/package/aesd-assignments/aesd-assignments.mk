@@ -5,7 +5,7 @@
 #
 ##############################################################
 
-AESD_ASSIGNMENTS_VERSION = main
+AESD_ASSIGNMENTS_VERSION = 2ed62a7bb0030cdad03bc8d70e333f9802479e87
 AESD_ASSIGNMENTS_SITE = git@github.com:vannidelprete/assignement5-part2-vannidelprete.git
 AESD_ASSIGNMENTS_SITE_METHOD = git
 AESD_ASSIGNMENTS_GIT_SUBMODULES = YES
