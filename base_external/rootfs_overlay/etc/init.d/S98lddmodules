@@ -3,10 +3,14 @@
 case "$1" in
     start)
         echo "Loading scull module"
-        /usr/bin/scull_load
+        modprobe scull
 
         echo "Loading faulty module"
-        /usr/bin/module_load faulty
+        modprobe faulty
+        # Create device node for faulty
+        MAJOR=$(awk '$2=="faulty" {print $1}' /proc/devices)
+        mknod /dev/faulty c $MAJOR 0
+        chmod 666 /dev/faulty
 
         echo "Loading hello module"
         modprobe hello
@@ -16,10 +20,11 @@ case "$1" in
         rmmod hello
 
         echo "Unloading faulty module"
-        /usr/bin/module_unload faulty
+        rm -f /dev/faulty
+        rmmod faulty
 
         echo "Unloading scull module"
-        /usr/bin/scull_unload
+        rmmod scull
         ;;
     *)
         echo "Usage: $0 {start|stop}"
