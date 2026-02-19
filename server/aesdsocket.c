@@ -17,7 +17,12 @@
 #include <stdbool.h>
 
 #define PORT 9000
-#define DATA_FILE "/var/tmp/aesdsocketdata"
+#define USE_AESD_CHAR_DEVICE 1
+#if USE_AESD_CHAR_DEVICE
+    #define DATA_FILE "/dev/aesdchar"
+#else
+    #define DATA_FILE "/var/tmp/aesdsocket"
+#endif
 #define BUFFER_SIZE 1024
 
 // Global variables for signal handling
@@ -70,11 +75,12 @@ void cleanup(void)
         data_fd = -1;
     }
 
-    // Delete the data file
+#if !USE_AESD_CHAR_DEVICE
     if (unlink(DATA_FILE) == -1 && errno != ENOENT)
     {
         syslog(LOG_ERR, "Failed to delete data file: %s", strerror(errno));
     }
+#endif
 
     closelog();
 }
@@ -189,8 +195,13 @@ int handle_connection(int client_fd)
         }
     }
 
-    // Send file contents back to client
-    lseek(data_fd, 0, SEEK_SET);
+    close(data_fd);
+    data_fd = open(DATA_FILE, O_RDONLY);
+    if (data_fd == -1)
+    {
+        syslog(LOG_ERR, "Failed to reopen data file: %s", strerror(errno));
+        return -1;
+    }
 
     while (!signal_received)
     {
