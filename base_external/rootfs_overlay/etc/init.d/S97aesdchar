@@ -1,0 +1,19 @@
+#!/bin/sh
+case "$1" in
+    start)
+        echo "Loading aesdchar module"
+        insmod /lib/modules/$(uname -r)/extra/aesdchar.ko
+        MAJOR=$(awk '$2=="aesdchar" {print $1}' /proc/devices)
+        mknod /dev/aesdchar c $MAJOR 0
+        chmod 666 /dev/aesdchar
+        ;;
+    stop)
+        echo "Unloading aesdchar module"
+        rm -f /dev/aesdchar
+        rmmod aesdchar
+        ;;
+    *)
+        echo "Usage: $0 {start|stop}"
+        exit 1
+esac
+exit 0
