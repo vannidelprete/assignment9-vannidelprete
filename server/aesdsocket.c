@@ -15,6 +15,8 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <stdbool.h>
+#include <sys/ioctl.h>
+#include "../aesd-char-driver/aesd_ioctl.h"
 
 #define PORT 9000
 #define USE_AESD_CHAR_DEVICE 1
@@ -139,19 +141,12 @@ int daemonize(void)
 
 int handle_connection(int client_fd)
 {
+    char *recv_buf = NULL;
+    size_t recv_buf_size = 0;
     char buffer[BUFFER_SIZE];
-    size_t bytes_received;
-    bool packet_complete = false;
+    ssize_t bytes_received;
 
-    // Open data file in append mode
-    data_fd = open(DATA_FILE, O_CREAT | O_RDWR | O_APPEND, 0644);
-    if (data_fd == -1)
-    {
-        syslog(LOG_ERR, "Failed to open data file: %s", strerror(errno));
-        return -1;
-    }
-
-    // Receive data from client
+    /* Accumulate the full packet until newline */
     while (!signal_received)
     {
         bytes_received = recv(client_fd, buffer, BUFFER_SIZE, 0);
@@ -159,81 +154,155 @@ int handle_connection(int client_fd)
         if (bytes_received < 0)
         {
             syslog(LOG_ERR, "recv failed: %s", strerror(errno));
-            close(data_fd);
-            data_fd = -1;
+            free(recv_buf);
             return -1;
         }
 
         if (bytes_received == 0)
-        {
-            // Connection closed by client
             break;
+
+        char *tmp = realloc(recv_buf, recv_buf_size + bytes_received);
+        if (!tmp)
+        {
+            syslog(LOG_ERR, "realloc failed");
+            free(recv_buf);
+            return -1;
+        }
+        recv_buf = tmp;
+        memcpy(recv_buf + recv_buf_size, buffer, bytes_received);
+        recv_buf_size += bytes_received;
+
+        if (memchr(recv_buf, '\n', recv_buf_size))
+            break;
+    }
+
+    if (recv_buf_size == 0)
+    {
+        free(recv_buf);
+        return 0;
+    }
+
+    /* Check if the received string is an AESDCHAR_IOCSEEKTO:X,Y command */
+    uint32_t write_cmd, write_cmd_offset;
+    if (sscanf(recv_buf, "AESDCHAR_IOCSEEKTO:%u,%u", &write_cmd, &write_cmd_offset) == 2)
+    {
+        /* Open the device with O_RDWR and keep the same fd for the read after ioctl */
+        data_fd = open(DATA_FILE, O_RDWR);
+        if (data_fd == -1)
+        {
+            syslog(LOG_ERR, "Failed to open data file: %s", strerror(errno));
+            free(recv_buf);
+            return -1;
         }
 
-        ssize_t bytes_written = write(data_fd, buffer, bytes_received);
-        if (bytes_written != bytes_received)
+        struct aesd_seekto seekto;
+        seekto.write_cmd = write_cmd;
+        seekto.write_cmd_offset = write_cmd_offset;
+
+        if (ioctl(data_fd, AESDCHAR_IOCSEEKTO, &seekto) == -1)
+        {
+            syslog(LOG_ERR, "ioctl failed: %s", strerror(errno));
+            close(data_fd);
+            data_fd = -1;
+            free(recv_buf);
+            return -1;
+        }
+
+        /* Read from the position set by ioctl and send back to client */
+        while (!signal_received)
+        {
+            ssize_t bytes_read = read(data_fd, buffer, BUFFER_SIZE);
+
+            if (bytes_read < 0)
+            {
+                syslog(LOG_ERR, "read failed: %s", strerror(errno));
+                close(data_fd);
+                data_fd = -1;
+                free(recv_buf);
+                return -1;
+            }
+
+            if (bytes_read == 0)
+                break;
+
+            ssize_t bytes_sent = send(client_fd, buffer, bytes_read, 0);
+            if (bytes_sent != bytes_read)
+            {
+                syslog(LOG_ERR, "send failed: %s", strerror(errno));
+                close(data_fd);
+                data_fd = -1;
+                free(recv_buf);
+                return -1;
+            }
+        }
+
+        close(data_fd);
+        data_fd = -1;
+    }
+    else
+    {
+        /* Normal behavior: write to device */
+        data_fd = open(DATA_FILE, O_CREAT | O_RDWR | O_APPEND, 0644);
+        if (data_fd == -1)
+        {
+            syslog(LOG_ERR, "Failed to open data file: %s", strerror(errno));
+            free(recv_buf);
+            return -1;
+        }
+
+        ssize_t bytes_written = write(data_fd, recv_buf, recv_buf_size);
+        if (bytes_written != (ssize_t)recv_buf_size)
         {
             syslog(LOG_ERR, "Failed to write to data file: %s", strerror(errno));
             close(data_fd);
             data_fd = -1;
+            free(recv_buf);
             return -1;
         }
 
-        // Check if packet is complete (contains newline)
-        for (ssize_t i = 0; i < bytes_received; i++)
+        close(data_fd);
+
+        /* Reopen and read everything from the beginning, send to client */
+        data_fd = open(DATA_FILE, O_RDONLY);
+        if (data_fd == -1)
         {
-            if (buffer[i] == '\n')
+            syslog(LOG_ERR, "Failed to reopen data file: %s", strerror(errno));
+            free(recv_buf);
+            return -1;
+        }
+
+        while (!signal_received)
+        {
+            ssize_t bytes_read = read(data_fd, buffer, BUFFER_SIZE);
+
+            if (bytes_read < 0)
             {
-                packet_complete = true;
+                syslog(LOG_ERR, "read failed: %s", strerror(errno));
+                close(data_fd);
+                data_fd = -1;
+                free(recv_buf);
+                return -1;
+            }
+
+            if (bytes_read == 0)
                 break;
+
+            ssize_t bytes_sent = send(client_fd, buffer, bytes_read, 0);
+            if (bytes_sent != bytes_read)
+            {
+                syslog(LOG_ERR, "send failed: %s", strerror(errno));
+                close(data_fd);
+                data_fd = -1;
+                free(recv_buf);
+                return -1;
             }
         }
 
-        if (packet_complete)
-        {
-            break;
-        }
+        close(data_fd);
+        data_fd = -1;
     }
 
-    close(data_fd);
-    data_fd = open(DATA_FILE, O_RDONLY);
-    if (data_fd == -1)
-    {
-        syslog(LOG_ERR, "Failed to reopen data file: %s", strerror(errno));
-        return -1;
-    }
-
-    while (!signal_received)
-    {
-        ssize_t bytes_read = read(data_fd, buffer, BUFFER_SIZE);
-
-        if (bytes_read < 0)
-        {
-            syslog(LOG_ERR, "Failed to read from data file: %s", strerror(errno));
-            close(data_fd);
-            data_fd = -1;
-            return -1;
-        }
-
-        if (bytes_read == 0)
-        {
-            // End of file
-            break;
-        }
-
-        ssize_t bytes_sent = send(client_fd, buffer, bytes_read, 0);
-        if (bytes_sent != bytes_read)
-        {
-            syslog(LOG_ERR, "send failed: %s", strerror(errno));
-            close(data_fd);
-            data_fd = -1;
-            return -1;
-        }
-    }
-
-    close(data_fd);
-    data_fd = -1;
-
+    free(recv_buf);
     return 0;
 }
 
